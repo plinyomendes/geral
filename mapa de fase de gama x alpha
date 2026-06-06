@@ -1,0 +1,112 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.optimize import minimize
+import os
+
+# --- 1. CARREGAMENTO E LIMPEZA (BAURU) ---
+caminho_arquivo = '/home/plinyo/Downloads/dados_covid_sp.csv'
+
+try:
+    df = pd.read_csv(caminho_arquivo, sep=';')
+    if 'nome_munic' not in df.columns:
+        df = pd.read_csv(caminho_arquivo, sep=',')
+except Exception as e:
+    print(f"Erro ao ler o arquivo: {e}")
+    exit()
+
+bauru = df[df['nome_munic'] == 'Bauru'].copy()
+bauru['datahora'] = pd.to_datetime(bauru['datahora'])
+bauru = bauru.sort_values('datahora')
+
+def limpar_numeros(x):
+    if pd.isna(x): return 0.0
+    if isinstance(x, str): return float(x.replace(',', '.'))
+    return float(x)
+
+bauru['casos_novos'] = bauru['casos_novos'].apply(limpar_numeros)
+bauru['I_ativo'] = bauru['casos_novos'].rolling(window=14, min_periods=1).sum()
+
+# Recorte da 1ª Onda Pura
+onda = bauru[(bauru['datahora'] >= '2020-05-01') & (bauru['datahora'] <= '2021-03-01')].copy()
+y_real = onda['I_ativo'].values
+N_bauru = 379146
+n_dias = len(y_real)
+
+# --- 2. MOTOR SIR FRACIONÁRIO ---
+def solver_sir_frac(alpha, beta, gamma, n_dias, h, i0_abs, N):
+    n_steps = int(n_dias / h)
+    s, i = np.zeros(n_steps), np.zeros(n_steps)
+    
+    i[0] = i0_abs / N
+    s[0] = 1.0 - i[0]
+    s0, i0_p = s[0], i[0]
+    
+    w = np.zeros(n_steps)
+    w[0] = 1.0
+    for j in range(1, n_steps):
+        w[j] = w[j-1] * (1 - (alpha + 1) / j)
+    
+    h_a = h**alpha
+    beta_f, gamma_f = beta**alpha, gamma**alpha 
+    
+    for k in range(1, n_steps):
+        fluxo_inf = beta_f * s[k-1] * i[k-1]
+        fluxo_rec = gamma_f * i[k-1]
+        
+        memo_s = np.dot(w[1:k+1], s[:k][::-1] - s0)
+        memo_i = np.dot(w[1:k+1], i[:k][::-1] - i0_p)
+        
+        s[k] = s0 - fluxo_inf * h_a - memo_s
+        i[k] = i0_p + (fluxo_inf - fluxo_rec) * h_a - memo_i
+        
+        if i[k] < 0: i[k] = 0 
+            
+    return i[::int(1/h)][:n_dias] * N
+
+# --- 3. MAPEAMENTO DO ESPAÇO DE PARÂMETROS (ALPHA x GAMMA) ---
+print("Gerando Mapa de Fase Alpha x Gamma...")
+
+# Fixamos o Beta com base no ótimo da onda (Ajuste caso seu Nelder-Mead tenha dado outro valor)
+BETA_FIXO = 0.35 
+
+# Malha para Alpha e Gamma
+res_grid = 25 
+alphas = np.linspace(0.5, 1.0, res_grid)
+# Gamma de 0.05 (20 dias para curar) até 0.25 (4 dias para curar)
+gammas = np.linspace(0.05, 0.25, res_grid) 
+
+A, G = np.meshgrid(alphas, gammas)
+SSE_matrix_gamma = np.zeros_like(A)
+
+# Calculando a matriz de erro
+for linha in range(res_grid):
+    for col in range(res_grid):
+        a_test = A[linha, col]
+        g_test = G[linha, col]
+        
+        y_sim = solver_sir_frac(a_test, BETA_FIXO, g_test, n_dias, 0.1, y_real[0], N_bauru)
+        erro_quadratico = np.sum((y_real - y_sim)**2)
+        SSE_matrix_gamma[linha, col] = erro_quadratico
+
+# --- 4. PLOTAGEM DO NOVO MAPA DE FASE ---
+plt.figure(figsize=(12, 8))
+
+contour = plt.contourf(A, G, np.log10(SSE_matrix_gamma), levels=40, cmap='plasma_r')
+cbar = plt.colorbar(contour)
+cbar.set_label('Log10 do Erro Quadrático (SSE)', fontsize=12)
+
+plt.contour(A, G, np.log10(SSE_matrix_gamma), levels=10, colors='black', alpha=0.3, linewidths=0.5)
+
+plt.title('Mapa de fase topológico: recuperação biológica (γ) vs memória sistêmica (α)\nSimulação com taxa de transmissão fixa (β=0.35)', fontsize=15, fontweight='bold')
+plt.xlabel('Ordem fracionária (α) - [memória sistêmica]', fontsize=12)
+plt.ylabel('Taxa de recuperação (γ) - [Inverso do tempo de infecção]', fontsize=12)
+
+plt.axvline(x=1.0, color='blue', linestyle='--', linewidth=2, label='Regime clássico (α=1.0)')
+
+plt.legend(loc='upper left', frameon=True, shadow=True)
+plt.tight_layout()
+
+plt.savefig('mapa_fase_alpha_gamma.png', dpi=300)
+print("Gráfico gerado com sucesso: 'mapa_fase_alpha_gamma.png'")
+plt.show()
