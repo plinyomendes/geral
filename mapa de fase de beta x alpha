@@ -1,0 +1,114 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+# --- 1. CARREGAMENTO DOS DADOS ---
+caminho_arquivo = '/home/plinyo/Downloads/dados_covid_sp.csv'
+
+try:
+    df = pd.read_csv(caminho_arquivo, sep=';')
+    if 'nome_munic' not in df.columns:
+        df = pd.read_csv(caminho_arquivo, sep=',')
+except Exception as e:
+    print(f"Erro ao ler o arquivo: {e}")
+    exit()
+
+bauru = df[df['nome_munic'] == 'Bauru'].copy()
+bauru['datahora'] = pd.to_datetime(bauru['datahora'])
+bauru = bauru.sort_values('datahora')
+
+def limpar_numeros(x):
+    if pd.isna(x): return 0.0
+    if isinstance(x, str): return float(x.replace(',', '.'))
+    return float(x)
+
+bauru['casos_novos'] = bauru['casos_novos'].apply(limpar_numeros)
+bauru['I_ativo'] = bauru['casos_novos'].rolling(window=14, min_periods=1).sum()
+
+# Recorte da 1ª Onda Pura
+onda = bauru[(bauru['datahora'] >= '2020-05-01') & (bauru['datahora'] <= '2021-03-01')].copy()
+y_real = onda['I_ativo'].values
+N_bauru = 379146
+n_dias = len(y_real)
+
+# --- 2. MOTOR SIR FRACIONÁRIO ---
+def solver_sir_frac(alpha, beta, gamma, n_dias, h, i0_abs, N):
+    n_steps = int(n_dias / h)
+    s, i = np.zeros(n_steps), np.zeros(n_steps)
+    
+    i[0] = i0_abs / N
+    s[0] = 1.0 - i[0]
+    s0, i0_p = s[0], i[0]
+    
+    w = np.zeros(n_steps)
+    w[0] = 1.0
+    for j in range(1, n_steps):
+        w[j] = w[j-1] * (1 - (alpha + 1) / j)
+    
+    h_a = h**alpha
+    beta_f, gamma_f = beta**alpha, gamma**alpha 
+    
+    for k in range(1, n_steps):
+        fluxo_inf = beta_f * s[k-1] * i[k-1]
+        fluxo_rec = gamma_f * i[k-1]
+        
+        memo_s = np.dot(w[1:k+1], s[:k][::-1] - s0)
+        memo_i = np.dot(w[1:k+1], i[:k][::-1] - i0_p)
+        
+        s[k] = s0 - fluxo_inf * h_a - memo_s
+        i[k] = i0_p + (fluxo_inf - fluxo_rec) * h_a - memo_i
+        
+        if i[k] < 0: i[k] = 0 
+            
+    return i[::int(1/h)][:n_dias] * N
+
+# --- 3. MAPEAMENTO DO ESPAÇO DE PARÂMETROS (GRID SEARCH) ---
+print("Iniciando varredura do espaço de parâmetros. Isso pode demorar um pouco...")
+
+# Fixamos o Gamma biológico (tempo de recuperação de aprox 10-14 dias)
+gamma_fixo = 0.10 
+
+# Criamos uma malha de valores para Alpha e Beta
+res_grid = 25 # Malha de 25x25 = 625 simulações
+alphas = np.linspace(0.5, 1.0, res_grid)
+betas = np.linspace(0.1, 0.8, res_grid)
+
+A, B = np.meshgrid(alphas, betas)
+SSE_matrix = np.zeros_like(A)
+
+# Calculando o erro para cada combinação
+for linha in range(res_grid):
+    for col in range(res_grid):
+        a_test = A[linha, col]
+        b_test = B[linha, col]
+        
+        y_sim = solver_sir_frac(a_test, b_test, gamma_fixo, n_dias, 0.1, y_real[0], N_bauru)
+        erro_quadratico = np.sum((y_real - y_sim)**2)
+        SSE_matrix[linha, col] = erro_quadratico
+
+# --- 4. PLOTAGEM DO MAPA DE FASE (HEATMAP) ---
+plt.figure(figsize=(12, 8))
+
+# Usamos log10 no SSE para o gráfico de contorno ficar visível, pois o erro varia muito
+contour = plt.contourf(A, B, np.log10(SSE_matrix), levels=40, cmap='viridis_r')
+cbar = plt.colorbar(contour)
+cbar.set_label('Log10 do Erro Quadrático (SSE)', fontsize=12)
+
+# Adicionando curvas de nível para destacar o "vale"
+plt.contour(A, B, np.log10(SSE_matrix), levels=10, colors='black', alpha=0.3, linewidths=0.5)
+
+plt.title('Mapa de fase do modelo SIR fracionário\nCorrelação biológica entre memória (α) e transmissão (β)', fontsize=15, fontweight='bold')
+plt.xlabel('Ordem fracionária (α) - [Memória sistêmica]', fontsize=12)
+plt.ylabel('Taxa de transmissão (β) - [Contágio]', fontsize=12)
+
+# Destacar a região clássica
+plt.axvline(x=1.0, color='red', linestyle='--', linewidth=2, label='Regime clássico (α=1.0)')
+
+plt.legend(loc='upper left', frameon=True, shadow=True)
+plt.grid(False)
+plt.tight_layout()
+
+plt.savefig('mapa_fase_parametros.png', dpi=300)
+print("Gráfico do mapa de fase gerado com sucesso: 'mapa_fase_parametros.png'")
+plt.show()
