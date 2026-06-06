@@ -1,0 +1,53 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+def resolver_oscilador_caputo(alpha, omega, x0, t_final, h):
+    N = int(t_final / h)
+    t = np.linspace(0, t_final, N)
+    x = np.zeros(N)
+    w = np.zeros(N)
+    
+    # Condição Inicial
+    x[0] = x0
+    
+    # Pesos de G-L via relação de recorrência
+    w[0] = 1.0
+    for j in range(1, N):
+        w[j] = (1 - (alpha + 1) / j) * w[j-1]
+        
+    # Loop de integração (Sentido de Caputo)
+    for k in range(1, N):
+        # f(t, x) = -omega^2 * x (Força Restauradora)
+        f_prev = -(omega**2) * x[k-1]
+        
+        # Somatória de memória otimizada com np.dot (Produto Escalar)
+        # soma = sum_{j=1}^k w[j] * (x[k-j] - x[0])
+        history = x[:k] - x[0]
+        weights = w[1:k+1]
+        soma_memoria = np.dot(weights, history[::-1])
+        
+        # Atualização do passo atual
+        x[k] = x[0] + (h**alpha) * f_prev - soma_memoria
+        
+    return t, x
+
+# Parâmetros
+omega = 2.0
+x0 = 1.0
+t_f = 25.0
+h = 0.01
+
+alphas = [1.2, 1.4, 1.6, 1.8, 2.0]
+plt.figure(figsize=(10, 6))
+
+for a in alphas:
+    t, x = resolver_oscilador_caputo(a, omega, x0, t_f, h)
+    label = f'$\\alpha={a:.1f}$' + (' (MHS)' if a == 2.0 else '')
+    style = 'k--' if a == 2.0 else '-'
+    plt.plot(t, x, style, label=label, alpha=0.8)
+
+plt.axhline(0, color='black', lw=1)
+plt.title('Oscilador farmônico fracionário - Método de G-L (Caputo)')
+plt.xlabel('Tempo (t)'); plt.ylabel('Posição x(t)')
+plt.legend(); plt.grid(True, alpha=0.3)
+plt.show()
